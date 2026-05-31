@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 OCR_PIPELINE_ROOT = Path.home() / "ocr_pipeline"
 COMPLETED_DIR     = OCR_PIPELINE_ROOT / "completed"
 ERRORS_DIR        = OCR_PIPELINE_ROOT / "errors"
+DEBUG_DIR         = OCR_PIPELINE_ROOT / "debug"
 
 # OEM 1  = LSTM neural-net engine (most accurate with modern Tesseract ≥ 4).
 # PSM 6  = Assume a single uniform block of text – best for full book pages.
@@ -340,6 +341,67 @@ def _clean_text(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Debug: intermediate-stage image saving
+# ---------------------------------------------------------------------------
+
+def _preprocess_debug(
+    img: np.ndarray,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """
+    Identical to _preprocess() but also returns every intermediate stage
+    as an ordered dict so callers can inspect or save them.
+
+    Returned keys (in order):
+        00_original   – the input image as-is (cropped half if spread)
+        01_grayscale  – single-channel luminance
+        02_denoised   – after Gaussian blur
+        03_deskewed   – after rotation correction
+        04_binarized  – final black-and-white result fed to Tesseract
+    """
+    gray     = _to_grayscale(img)
+    denoised = _denoise(gray)
+    deskewed = _deskew(denoised)
+    binary   = _binarize(deskewed)
+    stages: dict[str, np.ndarray] = {
+        "00_original":  img,
+        "01_grayscale": gray,
+        "02_denoised":  denoised,
+        "03_deskewed":  deskewed,
+        "04_binarized": binary,
+    }
+    return binary, stages
+
+
+def _save_debug_stages(
+    stages: dict[str, np.ndarray],
+    source_path: Path,
+    book_name: str,
+    label_suffix: str,
+) -> None:
+    """
+    Write each stage image to ~/ocr_pipeline/debug/{book_name}/{stem}/{stage}.png.
+
+    For spreads the label_suffix (" – vasen" / " – oikea") is turned into a
+    subdirectory name so left and right halves are kept separate:
+        debug/kirja/sivu001/vasen/01_grayscale.png
+        debug/kirja/sivu001/oikea/01_grayscale.png
+    For single pages all stages land directly under debug/kirja/sivu001/.
+    """
+    # " – vasen" → "vasen", "" → None
+    suffix_clean = re.sub(r"[^\w]", "_", label_suffix).strip("_")
+
+    base = DEBUG_DIR / book_name / source_path.stem
+    debug_dir = (base / suffix_clean) if suffix_clean else base
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, stage_img in stages.items():
+        out = debug_dir / f"{name}.png"
+        cv2.imwrite(str(out), stage_img)
+
+    logger.info("Välivaihekuvat tallennettu → %s", debug_dir)
+
+
+# ---------------------------------------------------------------------------
 # File-management helpers
 # ---------------------------------------------------------------------------
 
@@ -396,6 +458,7 @@ def _quarantine_image(filepath: Path) -> None:
 def process_book_image(
     filepath: Union[str, Path],
     book_name: str,
+    save_debug: bool = False,
 ) -> bool:
     """
     Run the complete OCR pipeline for one book-page scan.
@@ -445,8 +508,12 @@ def process_book_image(
 
         # ── Stages 3–5: Process each part (one page or two halves) ──────────
         for part_img, label_suffix in parts:
-            # Pre-process
-            processed = _preprocess(part_img)
+            # Pre-process (with optional debug image saving)
+            if save_debug:
+                processed, stages = _preprocess_debug(part_img)
+                _save_debug_stages(stages, filepath, book_name, label_suffix)
+            else:
+                processed = _preprocess(part_img)
 
             # OCR
             raw_text = _run_ocr(processed)

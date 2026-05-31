@@ -138,9 +138,10 @@ class OCREventHandler(FileSystemEventHandler):
     an IN_CREATE and an IN_MODIFY event fire for the same write).
     """
 
-    def __init__(self, executor: ThreadPoolExecutor) -> None:
+    def __init__(self, executor: ThreadPoolExecutor, save_debug: bool = False) -> None:
         super().__init__()
         self._executor = executor
+        self._save_debug = save_debug
         self._in_flight: set[str] = set()
         self._lock = threading.Lock()
 
@@ -171,7 +172,7 @@ class OCREventHandler(FileSystemEventHandler):
             if not _wait_for_stable(filepath):
                 logger.error("Dropping %s – file did not stabilise.", filepath.name)
                 return
-            process_book_image(filepath, book_name)
+            process_book_image(filepath, book_name, save_debug=self._save_debug)
         except Exception:
             # process_book_image has its own handler, but guard against anything
             # unexpected (import errors, OS errors outside the pipeline, etc.)
@@ -249,6 +250,11 @@ def main() -> None:
         help="Skip the start-up sweep for pre-existing images.",
     )
     parser.add_argument(
+        "--save-debug", action="store_true",
+        help="Save intermediate preprocessing images to ~/ocr_pipeline/debug/ "
+             "for each processed scan. Useful for tuning the pipeline.",
+    )
+    parser.add_argument(
         "--debug", action="store_true",
         help="Enable DEBUG-level log output.",
     )
@@ -264,7 +270,7 @@ def main() -> None:
         max_workers=args.workers,
         thread_name_prefix="ocr-worker",
     )
-    handler = OCREventHandler(executor)
+    handler = OCREventHandler(executor, save_debug=args.save_debug)
 
     if not args.no_backlog:
         process_backlog(handler)
