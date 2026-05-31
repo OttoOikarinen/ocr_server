@@ -58,6 +58,72 @@ TESS_CONFIG  = "--oem 1 --psm 6"
 # a portrait page into landscape orientation.
 MAX_SKEW_DEGREES = 15.0
 
+# width/height ratio above which the scan is treated as a double-page spread.
+# A portrait book page is ~0.65–0.75; two pages side by side reach ~1.3–1.5.
+SPREAD_ASPECT_RATIO = 1.2
+
+
+# ---------------------------------------------------------------------------
+# Spread (double-page) detection and splitting
+# ---------------------------------------------------------------------------
+
+def _find_gutter(gray: np.ndarray) -> int:
+    """
+    Locate the vertical binding gutter in a double-page spread.
+
+    The gutter is the darkest continuous vertical band in the centre third
+    of the image – the shadow cast by the book spine on a flatbed scanner.
+    Smoothing the column means with a wide kernel prevents a single ink-heavy
+    column (a long vertical rule, a tall capital letter) from being mistaken
+    for the gutter.
+
+    Returns the x-coordinate of the split column.
+    """
+    h, w = gray.shape
+
+    # Narrow the search to the middle third to skip page content entirely
+    x0 = w // 3
+    x1 = 2 * w // 3
+    region = gray[:, x0:x1].astype(np.float32)
+
+    col_means = region.mean(axis=0)
+
+    # Smooth over ~4 % of the image width so text noise doesn't dominate
+    kernel_w = max(int(w * 0.04), 10)
+    kernel = np.ones(kernel_w) / kernel_w
+    smoothed = np.convolve(col_means, kernel, mode="same")
+
+    gutter_offset = int(np.argmin(smoothed))
+    return x0 + gutter_offset
+
+
+def _split_spread(img: np.ndarray) -> list[tuple[np.ndarray, str]]:
+    """
+    Detect whether *img* is a double-page spread and split it if so.
+
+    Returns a list of (image, label_suffix) pairs:
+      - Single page : [(img, "")]
+      - Spread      : [(left_half, " – vasen"), (right_half, " – oikea")]
+
+    The label suffix is appended to the source filename in the PAGE marker
+    so each half can be traced back to its origin scan.
+    """
+    h, w = img.shape[:2]
+    ratio = w / h
+
+    if ratio < SPREAD_ASPECT_RATIO:
+        return [(img, "")]
+
+    logger.info("Aukeama tunnistettu (leveys/korkeus = %.2f) – halkaistaan.", ratio)
+
+    gray = _to_grayscale(img)
+    gutter = _find_gutter(gray)
+    logger.debug("Selkänauhaura sarakkeessa %d (kuvan leveys %d).", gutter, w)
+
+    left  = img[:, :gutter]
+    right = img[:, gutter:]
+    return [(left, " – vasen"), (right, " – oikea")]
+
 
 # ---------------------------------------------------------------------------
 # Image pre-processing
@@ -374,22 +440,29 @@ def process_book_image(
             )
         logger.debug("Loaded image: %s  shape=%s  dtype=%s", filepath.name, img.shape, img.dtype)
 
-        # ── Stage 2: Pre-process ─────────────────────────────────────────────
-        processed = _preprocess(img)
+        # ── Stage 2: Detect spread and split if needed ───────────────────────
+        parts = _split_spread(img)  # [(image, label_suffix), ...]
 
-        # ── Stage 3: OCR ─────────────────────────────────────────────────────
-        raw_text = _run_ocr(processed)
-        logger.debug("Raw OCR output: %d characters.", len(raw_text))
+        # ── Stages 3–5: Process each part (one page or two halves) ──────────
+        for part_img, label_suffix in parts:
+            # Pre-process
+            processed = _preprocess(part_img)
 
-        # ── Stage 4: Post-process ────────────────────────────────────────────
-        clean_text = _clean_text(raw_text)
-        logger.debug("Cleaned text:   %d characters.", len(clean_text))
+            # OCR
+            raw_text = _run_ocr(processed)
+            logger.debug("Raw OCR output (%s): %d chars.", filepath.name + label_suffix, len(raw_text))
 
-        # ── Stage 5 & 6: Persist and archive ────────────────────────────────
-        _append_to_master(book_name, clean_text, filepath.name)
+            # Post-process
+            clean_text = _clean_text(raw_text)
+            logger.debug("Cleaned text  (%s): %d chars.", filepath.name + label_suffix, len(clean_text))
+
+            # Append to master file; label distinguishes left/right halves
+            _append_to_master(book_name, clean_text, filepath.name + label_suffix)
+
+        # ── Stage 6: Archive original scan ───────────────────────────────────
         _archive_image(filepath, book_name)
 
-        logger.info("─── OCR done:  %s ───", filepath.name)
+        logger.info("─── OCR done:  %s (%d osa(a)) ───", filepath.name, len(parts))
         return True
 
     except Exception:
