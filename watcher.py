@@ -2,10 +2,10 @@
 """
 watcher.py – Watchdog file-system monitor for the Finnish OCR pipeline.
 
-Watches ~/ocr_pipeline/processing/ recursively for new image files.
+Watches ~/ocr_pipeline/incoming/ recursively for new image files.
 Each immediate subdirectory maps to a book name:
 
-    ~/ocr_pipeline/processing/{kirjan_nimi}/{sivu}.tif
+    ~/ocr_pipeline/incoming/{kirjan_nimi}/{sivu}.tif
 
 When a new image lands, it is queued for OCR via ocr_engine.process_book_image().
 
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PROCESSING_DIR = Path.home() / "ocr_pipeline" / "processing"
+PROCESSING_DIR = Path.home() / "ocr_pipeline" / "incoming"
 
 # All image formats that OpenCV (and therefore ocr_engine) can open
 SUPPORTED_EXTENSIONS = frozenset({
